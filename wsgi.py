@@ -1,168 +1,194 @@
-import click, sys, csv
-from tabulate import tabulate
-from models import db, Todo, Admin, RegularUser, db, User
+from flask import Flask, jsonify, request
+from functools import wraps
+from flask_cors import CORS
+#import integriy error
 from sqlalchemy.exc import IntegrityError
-from app import app
+from flask_jwt_extended import (
+    JWTManager,
+    create_access_token,
+    get_jwt_identity,
+    jwt_required,
+    set_access_cookies,
+    unset_jwt_cookies,
+)
+
+from models import Admin, Category, RegularUser, Todo, TodoCategory, db, User
+
+app = Flask(__name__)
+app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///project.db"
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SECRET_KEY'] = 'MySecretKey'
+app.config['JWT_ACCESS_COOKIE_NAME'] = 'access_token'
+app.config['JWT_REFRESH_COOKIE_NAME'] = 'refresh_token'
+app.config["JWT_TOKEN_LOCATION"] = ["cookies", "headers"]
+app.config["JWT_COOKIE_SECURE"] = False
+app.config["JWT_SECRET_KEY"] = "super-secret"
+app.config["JWT_COOKIE_CSRF_PROTECT"] = False
+app.config['JWT_COOKIE_SAMESITE'] = 'None'
 
 db.init_app(app)
+CORS(app)
+app.app_context().push()
+
+jwt = JWTManager(app)
 
 
-@app.cli.command("init", help="Creates and initializes the database")
-def initialize():
-  db.drop_all()
-  db.create_all()
- 
-  bob = RegularUser('bob', 'bob@mail.com', 'bobpass')
-  rick = RegularUser('rick', 'rick@mail.com', 'rickpass')
-  sally = RegularUser('sally', 'sally@mail.com', 'sallypass')
-  db.session.add_all([bob, rick, sally])  #add all can save multiple objects at once
-  db.session.commit()
-  #load todo data from csv file
-  with open('todos.csv') as file:
-    reader = csv.DictReader(file)
-    for row in reader:
-      new_todo = Todo(text=row['text'])  #create object
-      #update fields based on records
-      new_todo.done = True if row['done'] == 'true' else False
-      new_todo.user_id = int(row['user_id'])
-      db.session.add(new_todo)  #queue changes for saving
-    db.session.commit()
-    #save all changes OUTSIDE the loop
-  print('database intialized')
+# customn decorator authorize routes for admin or regular user
+def login_required(required_class):
+  def wrapper(f):
+    @wraps(f)
+    @jwt_required()  # Ensure JWT authentication
+    def decorated_function(*args, **kwargs):
+      user = required_class.query.filter_by(
+          username=get_jwt_identity()).first()
+      if user.__class__ != required_class:  # Check class equality
+        return jsonify(error='Invalid user role'), 403
+      return f(*args, **kwargs)
+    return decorated_function
+  return wrapper
 
 
-@app.cli.command("get-user", help="Retrieves a User by username or id")
-@click.argument('key', default='bob')
-def get_user(key):
-  bob = RegularUser.query.filter_by(username=key).first()
-  if not bob:
-    bob = RegularUser.query.get(int(key))
-    if not bob:
-      print(f'{key} not found!')
-      return
-  print(bob)
-
-
-@app.cli.command("change-email")
-@click.argument('username', default='bob')
-@click.argument('email', default='bob@mail.com')
-def change_email(username, email):
-  bob = RegularUser.query.filter_by(username=username).first()
-  if not bob:
-    print(f'{username} not found!')
-    return
-  bob.email = email
-  db.session.add(bob)
-  db.session.commit()
-  print(bob)
-
-
-@app.cli.command('get-users')
-def get_users():
-  users = User.query.all()
-  print(users)
-
-
-@app.cli.command('create-user')
-@click.argument('username', default='rick')
-@click.argument('email', default='rick@mail.com')
-@click.argument('password', default='rickpass')
-def create_user(username, email, password):
-  newuser = RegularUser(username, email, password)
-  try:
-    db.session.add(newuser)
-    db.session.commit()
-  except IntegrityError as e:
-    db.session.rollback()
-    print(e.orig)
-    print("Username or email already taken!")
-  else:
-    print(newuser)
-
-
-@app.cli.command('delete-user')
-@click.argument('username', default='bob')
-def delete_user(username):
-  bob = RegularUser.query.filter_by(username=username).first()
-  if not bob:
-    print(f'{username} not found!')
-    return
-  db.session.delete(bob)
-  db.session.commit()
-  print(f'{username} deleted')
-
-
-@app.cli.command('add-todo')
-@click.argument('username', default='bob')
-@click.argument('text', default='wash car')
-def add_task(username, text):
-  bob = RegularUser.query.filter_by(username=username).first()
-  if not bob:
-    print(f'{username} not found!')
-    return
-  new_todo = Todo(text)
-  bob.todos.append(new_todo)
-  db.session.add(bob)
-  db.session.commit()
-  print('Todo added!')
-
-
-@app.cli.command('get-todos')
-@click.argument('username', default='bob')
-def get_user_todos(username):
-  bob = RegularUser.query.filter_by(username=username).first()
-  if not bob:
-    print(f'{username} not found!')
-    return
-  print(bob.todos)
-
-
-@click.argument('todo_id', default=1)
-@click.argument('username', default='bob')
-@app.cli.command('toggle-todo')
-def toggle_todo_command(todo_id, username):
-  user = RegularUser.query.filter_by(username=username).first()
-  if not user:
-    print(f'{username} not found!')
-    return
-
-  todo = Todo.query.filter_by(id=todo_id, user_id=user.id).first()
-  if not todo:
-    print(f'{username} has no todo id {todo_id}')
-
-  todo.toggle()
-  print(f'{todo.text} is {"done" if todo.done else "not done"}!')
-
-
-@click.argument('category', default='chores')
-@click.argument('username', default='bob')
-@click.argument('todo_id', default=1)
-@app.cli.command('add-category', help="Adds a category to a todo")
-def add_todo_category_command(
-    category,
-    todo_id,
-    username,
-):
+def login_user(username, password):
   user = User.query.filter_by(username=username).first()
-  if not user:
-    print(f'user {username} not found!')
-    return
-
-  res = user.add_todo_category(todo_id, category)
-  if not res:
-    print(f'{username} has no todo id {todo_id}')
-    return
-
-  todo = Todo.query.get(todo_id)
-  print(todo)
+  if user and user.check_password(password):
+    token = create_access_token(identity=username)
+    response = jsonify(access_token=token)
+    set_access_cookies(response, token)
+    return response
+  return jsonify(error="Invalid username or password"), 401
 
 
-@app.cli.command('list-todos')
-def list_todos():
-  #tabulate package needs to work with an array of arrays
-  data = []
-  for todo in Todo.query.all():
-    data.append(
-        [todo.text, todo.done, todo.user.username,
-         todo.get_cat_list()])
-  print(tabulate(data, headers=["Text", "Done", "User", "Categories"]))
+@app.route('/')
+def index():
+  return '<h1>mY Todo API</h1>'
+
+
+# Login
+@app.route('/login', methods=['POST'])
+def user_login_view():
+  data = request.json
+  return login_user(data['username'], data['password'])
+
+
+@app.route('/identify')
+@jwt_required()
+def identify_view():
+  username = get_jwt_identity()
+  user = User.query.filter_by(username=username).first()
+  if user:
+    return jsonify(user.get_json())
+  return jsonify(message='Invalid user'), 403
+
+
+# Sign Up
+@app.route('/signup', methods=['POST'])
+def signup_user_view():
+  data = request.json
+  try:
+    new_user = RegularUser(data['username'], data['email'], data['password'])
+    db.session.add(new_user)
+    db.session.commit()
+    return jsonify(
+        message=f'User {new_user.id} - {new_user.username} created!'), 201
+  except IntegrityError:
+    db.session.rollback()
+    return jsonify(error='Username already exists'), 400
+
+
+# Logout
+@app.route('/logout', methods=['GET'])
+def logout():
+  response = jsonify(message='Logged out')
+  unset_jwt_cookies(response)
+  return response
+
+
+# Todo Crud Operations
+
+
+@app.route('/todos', methods=['POST'])
+@login_required(RegularUser)
+def create_todo_view():
+  data = request.json
+  username = get_jwt_identity()
+  user = RegularUser.query.filter_by(username=username).first()
+  new_todo = user.add_todo(data['text'])
+  return jsonify(message=f'todo {new_todo.id} created!'), 201
+
+
+@app.route('/todos', methods=['GET'])
+@login_required(RegularUser)
+def get_todos_view():
+  # get the user object of the authenticated user
+  user = RegularUser.query.filter_by(username=get_jwt_identity()).first()
+  # converts todo objects to list of todo dictionaries
+  todo_json = [todo.get_json() for todo in user.todos]
+  todo_json.reverse()
+  return jsonify(todo_json), 200
+
+
+@app.route('/todos/<int:id>', methods=['GET'])
+@login_required(RegularUser)
+def get_todo_view(id):
+  todo = Todo.query.get(id)
+
+  # must check if todo belongs to the authenticated user
+  if not todo or todo.user.username != get_jwt_identity():
+    return jsonify(error="Bad ID or unauthorized"), 401
+
+  return jsonify(todo.get_json()), 200
+
+
+@app.route('/todos/<int:id>', methods=['PUT'])
+@login_required(RegularUser)
+def edit_todo_view(id):
+  data = request.json
+  user = RegularUser.query.filter_by(username=get_jwt_identity()).first()
+
+  todo = Todo.query.get(id)
+
+  # must check if todo belongs to the authenticated user
+  if not todo or todo.user.username != get_jwt_identity():
+    return jsonify(error="Bad ID or unauthorized"), 401
+
+  user.update_todo(id, data['text'])
+  return jsonify(message=f"todo updated to '{data['text']}'!"), 200
+
+@app.route('/todos/<int:id>/done', methods=['PUT'])
+@login_required(RegularUser)
+def toggle_todo_view(id):
+  user = RegularUser.query.filter_by(username=get_jwt_identity()).first()
+
+  todo = Todo.query.get(id)
+
+  # must check if todo belongs to the authenticated user
+  if not todo or todo.user.username != get_jwt_identity():
+    return jsonify(error="Bad ID or unauthorized"), 401
+
+  todo = user.toggle_todo(id)
+  return jsonify(message=f"todo {'done' if todo.done else 'not done'}!"), 200
+
+@app.route('/todos/<int:id>', methods=['DELETE'])
+@login_required(RegularUser)
+def delete_todo_view(id):
+  user = RegularUser.query.filter_by(username=get_jwt_identity()).first()
+  todo = Todo.query.get(id)
+
+  # must check if todo belongs to the authenticated user
+  if not todo or todo.user.username != get_jwt_identity():
+    return jsonify(error="Bad ID or unauthorized"), 401
+
+  user.delete_todo(id)
+  return jsonify(message="todo deleted!"), 200
+
+
+@app.route('/todos/stats', methods=['GET'])
+@login_required(RegularUser)
+def get_stats_view():
+  user = RegularUser.query.filter_by(username=get_jwt_identity()).first()
+  return jsonify(num_todos=user.getNumTodos(),
+                 num_done=user.getDoneTodos()), 200
+
+
+if __name__ == "__main__":
+  app.run(host='0.0.0.0', debug=True)
